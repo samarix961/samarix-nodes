@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-V2Ray Config Fetcher & Health Checker
-بهینه شده برای GitHub Actions
+V2Ray / VLess / Trojan / Shadowsocks config fetcher & health checker
+طراحی‌شده برای اجرا در GitHub Actions
 """
 
 import os
@@ -14,47 +14,58 @@ import base64
 import socket
 import subprocess
 import platform
+import random
 from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 
-# تشخیص محیط (جهت تنظیم تردها)
+# ---------------- تنظیم محیط ----------------
+
 IS_GITHUB_ACTIONS = os.getenv("GITHUB_ACTIONS") == "true"
 
-# =============== تنظیمات ===============
 CONFIG = {
     "main_file": "sub.txt",
-    
-    # تنظیمات شبکه
+
+    # شبکه
     "request_timeout": 15,
-    "request_delay": 0.5,
-    
-    # تنظیمات تست
+    "request_delay_min": 0.8,   # حداقل تاخیر بین درخواست‌ها
+    "request_delay_max": 2.0,   # حداکثر تاخیر بین درخواست‌ها
+
+    # تست‌ها
     "test_timeout": 3,
     "tcp_retry": 2,
-    
-    # تعداد تردها (در گیت‌هاب کمتر باشد تا فشار نیاید)
     "max_workers": 20 if IS_GITHUB_ACTIONS else 50,
-    
-    # امنیت: حداقل تعداد کانفیگ سالم برای آپدیت فایل
+
+    # حداقل تعداد کانفیگ سالم برای این‌که فایل را آپدیت کنیم
     "min_configs": 10,
 }
 
-# لیست کشورها
+# سخت‌گیری تست‌ها (در صورت نیاز می‌توانی بعداً تغییرشان دهی)
+STRICT_PARSE = True       # اگر True باشد، لینک‌هایی که host/port ندارند حذف می‌شوند
+STRICT_TCP_ONLY = True    # اگر True باشد، فقط TCP ملاک است؛ Ping در قبولی نقشی ندارد
+
 COUNTRIES = [
     "us", "gb", "jp", "sg", "de", "nl", "ca", "fr", "kr", "hk",
     "tw", "au", "se", "ch", "no", "in", "br", "tr", "ru", "es",
     "pl", "cz", "at", "ae", "ro", "za", "il", "my", "ar"
 ]
 
-# --- لاگ ساده و خوانا ---
-def log(msg):
-    timestamp = time.strftime("%H:%M:%S")
-    print(f"[{timestamp}] {msg}")
 
-# --- توابع پارس ---
+# ---------------- لاگ ساده ----------------
+
+def log(msg):
+    ts = time.strftime("%H:%M:%S")
+    print(f"[{ts}] {msg}")
+
+
+# ---------------- پارس کانفیگ ----------------
+
 def parse_config(link: str):
+    """
+    تلاش برای استخراج host و port از لینک کانفیگ.
+    اگر موفق نشود، (None, None) برمی‌گرداند.
+    """
     try:
         if link.startswith("vmess://"):
             b64 = link[8:]
@@ -67,145 +78,218 @@ def parse_config(link: str):
             return parsed.hostname, parsed.port
 
         if link.startswith("ss://"):
+            # حالت رایج: ss://xxxx@host:port#name
             if '@' in link:
                 part = link.split('@', 1)[1].split('#', 1)[0]
                 if ':' in part:
                     host, port = part.rsplit(':', 1)
                     return host, int(port)
-    except:
+    except Exception:
         pass
     return None, None
 
-# --- توابع تست سلامت ---
+
+# ---------------- تست TCP و Ping ----------------
+
 def check_tcp(host, port):
+    """
+    تست TCP روی host:port با چند بار تلاش.
+    """
     for _ in range(CONFIG["tcp_retry"]):
         try:
-            sock = socket.create_connection((host, int(port)), timeout=CONFIG["test_timeout"])
+            sock = socket.create_connection(
+                (host, int(port)),
+                timeout=CONFIG["test_timeout"]
+            )
             sock.close()
             return True
-        except:
+        except Exception:
             time.sleep(0.1)
     return False
 
+
 def check_ping(host):
+    """
+    تست Ping (فقط اگر STRICT_TCP_ONLY=False باشد ممکن است برای قبولی استفاده شود).
+    در حالت فعلی ما، Ping در تصمیم نهایی نقشی ندارد.
+    """
     try:
         param = "-n" if platform.system().lower() == "windows" else "-c"
         cmd = ["ping", param, "1", "-W", "2", host]
-        return subprocess.call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
-    except:
+        return subprocess.call(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        ) == 0
+    except Exception:
         return False
 
-def test_single_config(link: str):
-    host, port = parse_config(link)
-    
-    # اگر آدرس پیدا نشد، ریسک نمی‌کنیم و نگهش می‌داریم
-    if not host or not port:
-        return link, True
 
-    # اولویت با TCP
+def test_single_config(link: str):
+    """
+    منطق تست هر کانفیگ:
+      - اگر پارس نشود:
+          * اگر STRICT_PARSE=True -> حذف
+          * اگر STRICT_PARSE=False -> نگه داشتن
+      - اگر TCP OK -> قبول
+      - اگر STRICT_TCP_ONLY=False و Ping OK -> قبول
+      - در غیر این صورت -> حذف
+    """
+    host, port = parse_config(link)
+
+    if not host or not port:
+        return link, (not STRICT_PARSE)
+
     if check_tcp(host, port):
         return link, True
 
-    # فال‌بک با Ping
-    if check_ping(host):
+    if not STRICT_TCP_ONLY and check_ping(host):
         return link, True
 
     return link, False
 
-# --- هسته اصلی دریافت ---
-def get_configs():
-    log("🚀 شروع دریافت کانفیگ‌ها...")
-    all_configs = set()
-    
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
 
-    for country in COUNTRIES:
+# ---------------- دریافت کانفیگ‌ها ----------------
+
+def get_configs():
+    log("🚀 شروع دریافت کانفیگ‌ها از v2nodes ...")
+    all_configs = set()
+
+    # سشن مشترک برای تمام درخواست‌ها
+    session = requests.Session()
+
+    # ترتیب کشورها را هر بار به‌طور تصادفی قاطی می‌کنیم
+    countries = COUNTRIES.copy()
+    random.shuffle(countries)
+
+    for country in countries:
         try:
             url = f"https://www.v2nodes.com/country/{country}/"
-            resp = requests.get(url, headers=headers, timeout=CONFIG["request_timeout"])
+            resp = session.get(url, timeout=CONFIG["request_timeout"])
 
             if resp.status_code != 200:
                 continue
 
-            m = re.search(r"https://www\.v2nodes\.com/subscriptions/country/[a-z0-9\-]+/\?key=[A-Za-z0-9]+", resp.text)
+            m = re.search(
+                r"https://www\.v2nodes\.com/subscriptions/country/[a-z0-9\-]+/\?key=[A-Za-z0-9]+",
+                resp.text
+            )
             if not m:
                 continue
 
             sub_url = m.group(0)
-            content = requests.get(sub_url, headers=headers, timeout=CONFIG["request_timeout"]).text.strip()
+            sub_resp = session.get(sub_url, timeout=CONFIG["request_timeout"])
+            content = sub_resp.text.strip()
 
+            # اگر محتوای subscription مستقیماً لینک‌ها نبود، سعی می‌کنیم base64 دیکد کنیم
             try:
-                if not any(p in content for p in ["vmess://", "vless://", "trojan://", "ss://"]):
+                if not any(p in content for p in ("vmess://", "vless://", "trojan://", "ss://")):
                     decoded = base64.b64decode(content).decode("utf-8")
                 else:
                     decoded = content
-            except:
+            except Exception:
                 decoded = content
 
-            count = 0
+            new_count = 0
             for line in decoded.splitlines():
                 line = line.strip()
-                if line and any(line.startswith(p) for p in ("vmess://", "vless://", "trojan://", "ss://")):
+                if not line:
+                    continue
+                if any(line.startswith(p) for p in ("vmess://", "vless://", "trojan://", "ss://")):
                     if line not in all_configs:
                         all_configs.add(line)
-                        count += 1
-            
-            if count > 0:
-                print(f"  + {country.upper()}: {count}")
+                        new_count += 1
+
+            if new_count > 0:
+                log(f"  + {country.upper()}: {new_count} کانفیگ جدید")
 
         except Exception as e:
-            print(f"  - خطا در {country.upper()}: {str(e)[:50]}")
+            log(f"  - خطا در {country.upper()}: {str(e)[:60]}")
 
-        time.sleep(CONFIG["request_delay"])
+        # تاخیر تصادفی بین درخواست‌ها برای کاهش الگوی ثابت
+        delay = random.uniform(CONFIG["request_delay_min"], CONFIG["request_delay_max"])
+        time.sleep(delay)
 
-    log(f"✅ مجموع دریافت شده: {len(all_configs)}")
+    session.close()
+
+    log(f"✅ مجموع کانفیگ‌های یکتا: {len(all_configs)}")
     return list(all_configs)
 
-# --- اجرای تست موازی ---
+
+# ---------------- فیلتر کردن Aliveها ----------------
+
 def filter_alive(configs):
-    log(f"🔍 شروع تست سلامت با {CONFIG['max_workers']} ترد...")
+    log(f"🔍 شروع تست سلامت {len(configs)} کانفیگ با {CONFIG['max_workers']} ترد ...")
+
     alive = []
-    
+    total = len(configs)
+
     with ThreadPoolExecutor(max_workers=CONFIG["max_workers"]) as executor:
         futures = [executor.submit(test_single_config, c) for c in configs]
         done = 0
-        for fut in as_completed(futures):
-            link, is_alive = fut.result()
-            if is_alive:
-                alive.append(link)
-            done += 1
-            if done % 50 == 0:
-                print(f"  ... تست {done}/{len(configs)} انجام شد")
 
-    log(f"✅ پایان تست. سالم: {len(alive)} (از {len(configs)})")
+        for fut in as_completed(futures):
+            link, ok = fut.result()
+            if ok:
+                alive.append(link)
+
+            done += 1
+            if done % 50 == 0 or done == total:
+                percent = done * 100 / total
+                log(f"  ... تست {done}/{total} ({percent:.1f}%)")
+
+    if total > 0:
+        alive_percent = len(alive) * 100 / total
+    else:
+        alive_percent = 0.0
+
+    log(f"✅ تست سلامت تمام شد. سالم: {len(alive)} ({alive_percent:.1f}%)")
     return alive
 
-# --- برنامه اصلی ---
-def main():
-    # 1. دریافت
-    configs = get_configs()
-    if not configs:
-        log("❌ هیچ کانفیگی دریافت نشد!")
-        sys.exit(1) # خروج با خطا -> ورک‌فلو متوقف می‌شود -> فایل قبلی دست‌نخورده می‌ماند
 
-    # 2. تست
-    alive_configs = filter_alive(configs)
+# ---------------- ذخیره‌سازی امن ----------------
 
-    # 3. بررسی کیفیت و ذخیره
-    if len(alive_configs) < CONFIG["min_configs"]:
-        log(f"❌ تعداد کانفیگ سالم ({len(alive_configs)}) کمتر از حد مجاز ({CONFIG['min_configs']}) است.")
-        log("⚠️ آپدیت لغو شد تا فایل قبلی خراب نشود.")
-        sys.exit(1) # خروج با خطا
+def save_if_enough(alive_configs, total_fetched):
+    """
+    اگر تعداد alive_configs >= min_configs باشد → فایل را overwrite می‌کنیم.
+    اگر کمتر باشد → exit code = 1 (در GitHub یعنی fail و commit انجام نمی‌شود).
+    """
+    alive_count = len(alive_configs)
+    if alive_count < CONFIG["min_configs"]:
+        log(
+            f"❌ تعداد کانفیگ سالم ({alive_count}) کمتر از حداقل مجاز "
+            f"({CONFIG['min_configs']}) است؛ فایل قبلی دست‌نخورده می‌ماند."
+        )
+        return False
 
-    # اگر همه چیز خوب بود، ذخیره می‌کنیم
     with open(CONFIG["main_file"], "w", encoding="utf-8") as f:
         for line in alive_configs:
             f.write(line + "\n")
-    
-    log(f"💾 فایل {CONFIG['main_file']} با موفقیت آپدیت شد.")
-    sys.exit(0) # خروج موفق
+
+    alive_percent = (alive_count * 100 / total_fetched) if total_fetched else 0.0
+    log(
+        f"💾 {alive_count} کانفیگ سالم در {CONFIG['main_file']} ذخیره شد "
+        f"(از {total_fetched}، حدود {alive_percent:.1f}%)."
+    )
+    return True
+
+
+# ---------------- main ----------------
+
+def main():
+    # 1) دریافت لیست خام
+    configs = get_configs()
+    if not configs:
+        log("❌ هیچ کانفیگی دریافت نشد!")
+        sys.exit(1)
+
+    # 2) تست سلامت
+    alive_configs = filter_alive(configs)
+
+    # 3) ذخیره فقط اگر به اندازه کافی سالم داشتیم
+    ok = save_if_enough(alive_configs, len(configs))
+    sys.exit(0 if ok else 1)
+
 
 if __name__ == "__main__":
     main()
