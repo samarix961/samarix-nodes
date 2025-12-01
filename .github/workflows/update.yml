@@ -3,9 +3,8 @@ name: Update Configs
 on:
   schedule:
     - cron: '0 */4 * * *'   # هر ۴ ساعت
-  workflow_dispatch:        # اجرای دستی هم داشته باش
+  workflow_dispatch:
 
-# جلوگیری از اجرای همزمان چند run
 concurrency:
   group: update-configs
   cancel-in-progress: false
@@ -22,7 +21,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2     # کمی history برای diff کافی است
+          fetch-depth: 2
 
       - name: Setup Python
         uses: actions/setup-python@v4
@@ -36,15 +35,12 @@ jobs:
         run: python update.py
 
       - name: Commit and Push (only if updater succeeded)
-        if: success()        # فقط اگر update.py با exit code صفر تمام شده باشد
+        if: success()
         run: |
           git config --local user.email "bot@github.com"
           git config --local user.name "GitHub Action"
 
-          # هر دو خروجی را به staging اضافه کن
           git add sub.txt samarix.txt
-
-          # اگر هیچ تغییری نبود، commit نکن و بدون ارور خارج شو
           git diff --quiet && git diff --staged --quiet && echo "No changes to commit." && exit 0
 
           git commit -m "Auto update configs: $(date -u +'%Y-%m-%d %H:%M UTC')"
