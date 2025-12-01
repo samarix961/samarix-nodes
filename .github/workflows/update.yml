@@ -5,7 +5,7 @@ on:
     - cron: '0 */4 * * *'   # هر ۴ ساعت
   workflow_dispatch:        # اجرای دستی هم داشته باش
 
-# جلوگیری از اجرای همزمان چند run (مثلاً اگر دستی یکی دیگر را استارت بزنی)
+# جلوگیری از اجرای همزمان چند run
 concurrency:
   group: update-configs
   cancel-in-progress: false
@@ -13,10 +13,10 @@ concurrency:
 jobs:
   update:
     runs-on: ubuntu-latest
-    timeout-minutes: 25      # حداکثر زمان برای اطمینان
+    timeout-minutes: 25
 
     permissions:
-      contents: write        # اجازه‌ی commit/push
+      contents: write
 
     steps:
       - name: Checkout code
@@ -28,7 +28,6 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
-          cache: 'pip'       # کش کردن پکیج‌های pip (مثل requests)
 
       - name: Install dependencies
         run: pip install requests
@@ -37,7 +36,7 @@ jobs:
         run: python update.py
 
       - name: Commit and Push (only if updater succeeded)
-        if: success()        # فقط اگر python exit code = 0 بود
+        if: success()        # فقط اگر update.py با exit code صفر تمام شده باشد
         run: |
           git config --local user.email "bot@github.com"
           git config --local user.name "GitHub Action"
