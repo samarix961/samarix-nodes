@@ -53,16 +53,17 @@ COUNTRIES = [
     "pl", "cz", "at", "ae", "ro", "za", "il", "my", "ar"
 ]
 
-# کشورهای اولویت بالا (۳ تا در samarix برای پورت‌های مشکوک)
+# کشورهای اولویت بالا
 HIGH_PRIORITY = {
     "US", "GB", "DE", "NL", "CA", "FR", "JP", "SG", "KR", "AU", "SE"
 }
 
-# پورت‌های خوب (وبی/طبیعی) – بدون محدودیت تعداد در samarix
+# پورت‌های خوب
 GOOD_PORTS = {80, 443, 8443, 8080, 2053, 2083, 2087, 2095, 2096}
 
-# پورت‌های حساس پرتکرار (کنترل ویژه)
+# پورت‌های حساس پرتکرار
 SENSITIVE_PORTS = {990, 12000}
+
 
 def log(msg):
     ts = time.strftime("%H:%M:%S")
@@ -154,13 +155,16 @@ def test_single_config(link: str, strict_parse: bool, strict_tcp_only: bool):
 # ---------------- دریافت کانفیگ‌ها ----------------
 
 def get_configs():
+    """
+    جمع‌آوری همه‌ی کانفیگ‌ها از v2nodes، بدون تکرار واقعی.
+    تکرار واقعی = URI یکسان (تا قبل از #)، حتی اگر Remark فرق داشته باشد.
+    """
     log("🚀 شروع دریافت کانفیگ‌ها از v2nodes ...")
     all_configs = []
-    seen = set()
+    seen_uris = set()   # یکتا بر اساس uri (بخش قبل از #)
 
     session = requests.Session()
 
-    # ترتیب کشورها را تصادفی می‌کنیم، اما داخل هر کشور از بالا به پایین می‌خوانیم
     countries = COUNTRIES.copy()
     random.shuffle(countries)
 
@@ -196,14 +200,19 @@ def get_configs():
                 line = line.strip()
                 if not line:
                     continue
-                if any(line.startswith(p) for p in ("vmess://", "vless://", "trojan://", "ss://")):
-                    if line not in seen:
-                        seen.add(line)
-                        all_configs.append(line)  # ترتیب سایت حفظ می‌شود
-                        new_count += 1
+                if not any(line.startswith(p) for p in ("vmess://", "vless://", "trojan://", "ss://")):
+                    continue
+
+                # فقط بخش قبل از # را برای تشخیص تکرار در نظر می‌گیریم
+                uri = line.split('#', 1)[0].strip()
+
+                if uri not in seen_uris:
+                    seen_uris.add(uri)
+                    all_configs.append(line)  # یک نمونه از این URI را نگه می‌داریم (اولینش)
+                    new_count += 1
 
             if new_count > 0:
-                log(f"  + {country.upper()}: {new_count} کانفیگ جدید")
+                log(f"  + {country.upper()}: {new_count} کانفیگ جدید (بعد از حذف تکرار واقعی)")
 
         except Exception as e:
             log(f"  - خطا در {country.upper()}: {str(e)[:60]}")
@@ -213,7 +222,7 @@ def get_configs():
 
     session.close()
 
-    log(f"✅ مجموع کانفیگ‌های یکتا (به‌ترتیب سایت): {len(all_configs)}")
+    log(f"✅ مجموع URI یکتای جمع‌آوری‌شده (به‌ترتیب سایت): {len(all_configs)}")
     return all_configs
 
 
@@ -300,7 +309,7 @@ def build_samarix(soft_configs):
     selected = []
 
     # شمارنده برای هر کشور
-    country_risky = {}      # تعداد روی پورت‌های risky (غیر GOOD/SENSITIVE)
+    country_risky = {}      # تعداد روی پورت‌های risky
     country_sensitive = {}  # تعداد روی 990/12000
 
     for link in soft_configs:
