@@ -1,33 +1,38 @@
-name: Auto Update Configs
+name: Update Configs
 
 on:
   schedule:
-    - cron: '0 */4 * * *'  # اجرا هر 4 ساعت یک‌بار
-  workflow_dispatch:       # دکمه اجرای دستی
+    - cron: '0 */4 * * *'
+  workflow_dispatch:
 
 jobs:
-  build:
+  update:
     runs-on: ubuntu-latest
     
+    permissions:
+      contents: write
+    
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
-
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.9'
-
-    - name: Install requests
-      run: pip install requests
-
-    - name: Run Scraper
-      run: python update.py
-
-    - name: Commit and Push changes
-      run: |
-        git config --local user.email "github-actions[bot]@users.noreply.github.com"
-        git config --local user.name "github-actions[bot]"
-        git add sub.txt
-        git commit -m "Auto update configs: $(date)" || exit 0
-        git push
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          
+      - name: Install requests
+        run: pip install requests
+        
+      - name: Run Updater
+        run: python update.py
+        
+      - name: Commit and Push
+        # فقط اگر مرحله قبل (پایتون) موفق بود اجرا شود
+        if: success()
+        run: |
+          git config --local user.email "bot@github.com"
+          git config --local user.name "GitHub Action"
+          git add sub.txt
+          # اگر تغییری نبود، ارور نده
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto update: $(date)" && git push)
