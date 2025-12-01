@@ -2,6 +2,9 @@
 # -*- coding: utf-8 -*-
 """
 V2Ray / VLess / Trojan / Shadowsocks config fetcher & health checker
+دو خروجی:
+  - sub.txt      : فیلتر نرم (برای استفاده عمومی / آرشیو)
+  - samarix.txt  : فیلتر سخت‌گیرانه (برای استفاده مستقیم در برنامه)
 طراحی‌شده برای اجرا در GitHub Actions
 """
 
@@ -25,25 +28,23 @@ import requests
 IS_GITHUB_ACTIONS = os.getenv("GITHUB_ACTIONS") == "true"
 
 CONFIG = {
-    "main_file": "sub.txt",
+    "soft_file": "sub.txt",        # خروجی فیلتر نرم
+    "hard_file": "samarix.txt",    # خروجی فیلتر سخت
 
     # شبکه
     "request_timeout": 15,
-    "request_delay_min": 0.8,   # حداقل تاخیر بین درخواست‌ها
-    "request_delay_max": 2.0,   # حداکثر تاخیر بین درخواست‌ها
+    "request_delay_min": 0.8,
+    "request_delay_max": 2.0,
 
     # تست‌ها
     "test_timeout": 3,
     "tcp_retry": 2,
     "max_workers": 20 if IS_GITHUB_ACTIONS else 50,
 
-    # حداقل تعداد کانفیگ سالم برای این‌که فایل را آپدیت کنیم
-    "min_configs": 10,
+    # حداقل تعداد کانفیگ سالم برای این‌که فایل‌ها را آپدیت کنیم
+    "min_soft_configs": 10,   # حداقل برای sub.txt
+    "min_hard_configs": 5,    # حداقل برای samarix.txt
 }
-
-# سخت‌گیری تست‌ها (در صورت نیاز می‌توانی بعداً تغییرشان دهی)
-STRICT_PARSE = True       # اگر True باشد، لینک‌هایی که host/port ندارند حذف می‌شوند
-STRICT_TCP_ONLY = True    # اگر True باشد، فقط TCP ملاک است؛ Ping در قبولی نقشی ندارد
 
 COUNTRIES = [
     "us", "gb", "jp", "sg", "de", "nl", "ca", "fr", "kr", "hk",
@@ -51,8 +52,6 @@ COUNTRIES = [
     "pl", "cz", "at", "ae", "ro", "za", "il", "my", "ar"
 ]
 
-
-# ---------------- لاگ ساده ----------------
 
 def log(msg):
     ts = time.strftime("%H:%M:%S")
@@ -62,10 +61,7 @@ def log(msg):
 # ---------------- پارس کانفیگ ----------------
 
 def parse_config(link: str):
-    """
-    تلاش برای استخراج host و port از لینک کانفیگ.
-    اگر موفق نشود، (None, None) برمی‌گرداند.
-    """
+    """استخراج host و port از لینک کانفیگ؛ در صورت شکست (None, None)."""
     try:
         if link.startswith("vmess://"):
             b64 = link[8:]
@@ -78,7 +74,7 @@ def parse_config(link: str):
             return parsed.hostname, parsed.port
 
         if link.startswith("ss://"):
-            # حالت رایج: ss://xxxx@host:port#name
+            # ss://...@host:port#name
             if '@' in link:
                 part = link.split('@', 1)[1].split('#', 1)[0]
                 if ':' in part:
@@ -91,15 +87,13 @@ def parse_config(link: str):
 
 # ---------------- تست TCP و Ping ----------------
 
-def check_tcp(host, port):
-    """
-    تست TCP روی host:port با چند بار تلاش.
-    """
+def check_tcp(host, port, timeout):
+    """تست TCP روی host:port با چند بار تلاش."""
     for _ in range(CONFIG["tcp_retry"]):
         try:
             sock = socket.create_connection(
                 (host, int(port)),
-                timeout=CONFIG["test_timeout"]
+                timeout=timeout
             )
             sock.close()
             return True
@@ -109,10 +103,7 @@ def check_tcp(host, port):
 
 
 def check_ping(host):
-    """
-    تست Ping (فقط اگر STRICT_TCP_ONLY=False باشد ممکن است برای قبولی استفاده شود).
-    در حالت فعلی ما، Ping در تصمیم نهایی نقشی ندارد.
-    """
+    """تست Ping (فقط در حالت نرم استفاده می‌شود، آن هم اختیاری)."""
     try:
         param = "-n" if platform.system().lower() == "windows" else "-c"
         cmd = ["ping", param, "1", "-W", "2", host]
@@ -125,25 +116,28 @@ def check_ping(host):
         return False
 
 
-def test_single_config(link: str):
+def test_single_config(link: str, strict_parse: bool, strict_tcp_only: bool):
     """
-    منطق تست هر کانفیگ:
-      - اگر پارس نشود:
-          * اگر STRICT_PARSE=True -> حذف
-          * اگر STRICT_PARSE=False -> نگه داشتن
-      - اگر TCP OK -> قبول
-      - اگر STRICT_TCP_ONLY=False و Ping OK -> قبول
-      - در غیر این صورت -> حذف
+    تست یک کانفیگ بر اساس دو پارامتر:
+      strict_parse:
+        True  -> اگر host/port درنیاید، حذف
+        False -> اگر host/port درنیاید، نگه داشتن
+      strict_tcp_only:
+        True  -> فقط TCP قبول است
+        False -> اگر TCP نشد ولی Ping اوکی بود، قبول
+    خروجی: (link, is_alive: bool)
     """
     host, port = parse_config(link)
 
     if not host or not port:
-        return link, (not STRICT_PARSE)
+        return link, (not strict_parse)
 
-    if check_tcp(host, port):
+    # TCP معیار اصلی
+    if check_tcp(host, port, timeout=CONFIG["test_timeout"]):
         return link, True
 
-    if not STRICT_TCP_ONLY and check_ping(host):
+    # اگر سخت‌گیر نیستیم، از Ping به‌عنوان fallback استفاده کنیم
+    if (not strict_tcp_only) and check_ping(host):
         return link, True
 
     return link, False
@@ -155,10 +149,8 @@ def get_configs():
     log("🚀 شروع دریافت کانفیگ‌ها از v2nodes ...")
     all_configs = set()
 
-    # سشن مشترک برای تمام درخواست‌ها
     session = requests.Session()
 
-    # ترتیب کشورها را هر بار به‌طور تصادفی قاطی می‌کنیم
     countries = COUNTRIES.copy()
     random.shuffle(countries)
 
@@ -181,7 +173,6 @@ def get_configs():
             sub_resp = session.get(sub_url, timeout=CONFIG["request_timeout"])
             content = sub_resp.text.strip()
 
-            # اگر محتوای subscription مستقیماً لینک‌ها نبود، سعی می‌کنیم base64 دیکد کنیم
             try:
                 if not any(p in content for p in ("vmess://", "vless://", "trojan://", "ss://")):
                     decoded = base64.b64decode(content).decode("utf-8")
@@ -206,7 +197,6 @@ def get_configs():
         except Exception as e:
             log(f"  - خطا در {country.upper()}: {str(e)[:60]}")
 
-        # تاخیر تصادفی بین درخواست‌ها برای کاهش الگوی ثابت
         delay = random.uniform(CONFIG["request_delay_min"], CONFIG["request_delay_max"])
         time.sleep(delay)
 
@@ -216,16 +206,23 @@ def get_configs():
     return list(all_configs)
 
 
-# ---------------- فیلتر کردن Aliveها ----------------
+# ---------------- فیلتر کردن با تنظیمات داده‌شده ----------------
 
-def filter_alive(configs):
-    log(f"🔍 شروع تست سلامت {len(configs)} کانفیگ با {CONFIG['max_workers']} ترد ...")
+def filter_with_mode(configs, strict_parse: bool, strict_tcp_only: bool, label: str):
+    """
+    یک بار کل لیست configs را با تنظیمات مشخص تست می‌کند.
+    label فقط برای لاگ است (soft / hard).
+    """
+    log(f"🔍 شروع تست ({label}) روی {len(configs)} کانفیگ با {CONFIG['max_workers']} ترد ...")
 
     alive = []
     total = len(configs)
 
     with ThreadPoolExecutor(max_workers=CONFIG["max_workers"]) as executor:
-        futures = [executor.submit(test_single_config, c) for c in configs]
+        futures = [
+            executor.submit(test_single_config, c, strict_parse, strict_tcp_only)
+            for c in configs
+        ]
         done = 0
 
         for fut in as_completed(futures):
@@ -236,59 +233,71 @@ def filter_alive(configs):
             done += 1
             if done % 50 == 0 or done == total:
                 percent = done * 100 / total
-                log(f"  ... تست {done}/{total} ({percent:.1f}%)")
+                log(f"  ... ({label}) تست {done}/{total} ({percent:.1f}%)")
 
     if total > 0:
         alive_percent = len(alive) * 100 / total
     else:
         alive_percent = 0.0
 
-    log(f"✅ تست سلامت تمام شد. سالم: {len(alive)} ({alive_percent:.1f}%)")
+    log(f"✅ تست ({label}) تمام شد. سالم: {len(alive)} ({alive_percent:.1f}%)")
     return alive
 
 
-# ---------------- ذخیره‌سازی امن ----------------
+# ---------------- ذخیره‌سازی ----------------
 
-def save_if_enough(alive_configs, total_fetched):
-    """
-    اگر تعداد alive_configs >= min_configs باشد → فایل را overwrite می‌کنیم.
-    اگر کمتر باشد → exit code = 1 (در GitHub یعنی fail و commit انجام نمی‌شود).
-    """
-    alive_count = len(alive_configs)
-    if alive_count < CONFIG["min_configs"]:
-        log(
-            f"❌ تعداد کانفیگ سالم ({alive_count}) کمتر از حداقل مجاز "
-            f"({CONFIG['min_configs']}) است؛ فایل قبلی دست‌نخورده می‌ماند."
-        )
-        return False
-
-    with open(CONFIG["main_file"], "w", encoding="utf-8") as f:
-        for line in alive_configs:
+def save_list_to_file(configs, path, kind: str):
+    with open(path, "w", encoding="utf-8") as f:
+        for line in configs:
             f.write(line + "\n")
-
-    alive_percent = (alive_count * 100 / total_fetched) if total_fetched else 0.0
-    log(
-        f"💾 {alive_count} کانفیگ سالم در {CONFIG['main_file']} ذخیره شد "
-        f"(از {total_fetched}، حدود {alive_percent:.1f}%)."
-    )
-    return True
+    log(f"💾 {len(configs)} کانفیگ ({kind}) در فایل {path} ذخیره شد.")
 
 
 # ---------------- main ----------------
 
 def main():
-    # 1) دریافت لیست خام
+    # 1) گرفتن لیست خام
     configs = get_configs()
     if not configs:
         log("❌ هیچ کانفیگی دریافت نشد!")
         sys.exit(1)
 
-    # 2) تست سلامت
-    alive_configs = filter_alive(configs)
+    # 2) فیلتر نرم (برای sub.txt)
+    soft_alive = filter_with_mode(
+        configs,
+        strict_parse=False,      # نرم: لینک‌های غیرقابل‌پارس را هم نگه می‌داریم
+        strict_tcp_only=False,   # نرم: اگر فقط Ping اوکی بود هم قبول
+        label="SOFT"
+    )
 
-    # 3) ذخیره فقط اگر به اندازه کافی سالم داشتیم
-    ok = save_if_enough(alive_configs, len(configs))
-    sys.exit(0 if ok else 1)
+    if len(soft_alive) < CONFIG["min_soft_configs"]:
+        log(
+            f"❌ تعداد کانفیگ سالم در حالت نرم ({len(soft_alive)}) کمتر از حداقل "
+            f"({CONFIG['min_soft_configs']}) است؛ هیچ فایلی آپدیت نمی‌شود."
+        )
+        sys.exit(1)
+
+    save_list_to_file(soft_alive, CONFIG["soft_file"], "SOFT")
+
+    # 3) فیلتر سخت روی همین soft_alive (برای samarix.txt)
+    hard_alive = filter_with_mode(
+        soft_alive,
+        strict_parse=True,       # سخت: فقط لینک‌های قابل‌پارس
+        strict_tcp_only=True,    # سخت: فقط TCP
+        label="HARD"
+    )
+
+    if len(hard_alive) < CONFIG["min_hard_configs"]:
+        log(
+            f"⚠️ تعداد کانفیگ سالم در حالت سخت ({len(hard_alive)}) کمتر از حداقل "
+            f"({CONFIG['min_hard_configs']}) است؛ فایل سخت (samarix.txt) آپدیت نمی‌شود."
+        )
+        # اما چون sub.txt نرم را داریم، می‌توانیم همچنان موفق خارج شویم
+        # اگر می‌خواهی در این حالت هم fail شود، این‌جا sys.exit(1) بذار
+    else:
+        save_list_to_file(hard_alive, CONFIG["hard_file"], "HARD")
+
+    sys.exit(0)
 
 
 if __name__ == "__main__":
