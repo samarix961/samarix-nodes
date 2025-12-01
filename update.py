@@ -292,8 +292,7 @@ def main():
             f"⚠️ تعداد کانفیگ سالم در حالت سخت ({len(hard_alive)}) کمتر از حداقل "
             f"({CONFIG['min_hard_configs']}) است؛ فایل سخت (samarix.txt) آپدیت نمی‌شود."
         )
-        # اما چون sub.txt نرم را داریم، می‌توانیم همچنان موفق خارج شویم
-        # اگر می‌خواهی در این حالت هم fail شود، این‌جا sys.exit(1) بذار
+        # sub.txt آپدیت شده، بنابراین job می‌تواند موفق تمام شود
     else:
         save_list_to_file(hard_alive, CONFIG["hard_file"], "HARD")
 
