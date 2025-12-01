@@ -2,37 +2,51 @@ name: Update Configs
 
 on:
   schedule:
-    - cron: '0 */4 * * *'
-  workflow_dispatch:
+    - cron: '0 */4 * * *'   # هر ۴ ساعت
+  workflow_dispatch:        # اجرای دستی هم داشته باش
+
+# جلوگیری از اجرای همزمان چند run (مثلاً اگر دستی یکی دیگر را استارت بزنی)
+concurrency:
+  group: update-configs
+  cancel-in-progress: false
 
 jobs:
   update:
     runs-on: ubuntu-latest
-    
+    timeout-minutes: 25      # حداکثر زمان برای اطمینان
+
     permissions:
-      contents: write
-    
+      contents: write        # اجازه‌ی commit/push
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+        with:
+          fetch-depth: 2     # کمی history برای diff کافی است
+
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
-          
-      - name: Install requests
+          cache: 'pip'       # کش کردن پکیج‌های pip (مثل requests)
+
+      - name: Install dependencies
         run: pip install requests
-        
-      - name: Run Updater
+
+      - name: Run updater script
         run: python update.py
-        
-      - name: Commit and Push
-        # فقط اگر مرحله قبل (پایتون) موفق بود اجرا شود
-        if: success()
+
+      - name: Commit and Push (only if updater succeeded)
+        if: success()        # فقط اگر python exit code = 0 بود
         run: |
           git config --local user.email "bot@github.com"
           git config --local user.name "GitHub Action"
-          git add sub.txt
-          # اگر تغییری نبود، ارور نده
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto update: $(date)" && git push)
+
+          # هر دو خروجی را به staging اضافه کن
+          git add sub.txt samarix.txt
+
+          # اگر هیچ تغییری نبود، commit نکن و بدون ارور خارج شو
+          git diff --quiet && git diff --staged --quiet && echo "No changes to commit." && exit 0
+
+          git commit -m "Auto update configs: $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git push
