@@ -2,9 +2,11 @@
 # -*- coding: utf-8 -*-
 """
 V2Ray / VLess / Trojan / Shadowsocks config fetcher & health checker
-دو خروجی:
-  - sub.txt      : فیلتر نرم (برای استفاده عمومی / آرشیو)
-  - samarix.txt  : فیلتر سخت‌گیرانه (برای استفاده مستقیم در برنامه)
+
+خروجی‌ها:
+  - sub.txt      : فیلتر نرم (همه‌ی کانفیگ‌های Alive، برای استفاده عمومی/آرشیو)
+  - samarix.txt  : فیلتر سخت‌گیرانه (بین‌المللی، محدود به کشور/پورت برای برنامه‌ی اصلی)
+
 طراحی‌شده برای اجرا در GitHub Actions
 """
 
@@ -41,9 +43,8 @@ CONFIG = {
     "tcp_retry": 2,
     "max_workers": 20 if IS_GITHUB_ACTIONS else 50,
 
-    # حداقل تعداد کانفیگ سالم برای این‌که فایل‌ها را آپدیت کنیم
-    "min_soft_configs": 10,   # حداقل برای sub.txt
-    "min_hard_configs": 5,    # حداقل برای samarix.txt
+    # حداقل تعداد کانفیگ سالم برای این‌که sub.txt را آپدیت کنیم
+    "min_soft_configs": 10,
 }
 
 COUNTRIES = [
@@ -52,6 +53,16 @@ COUNTRIES = [
     "pl", "cz", "at", "ae", "ro", "za", "il", "my", "ar"
 ]
 
+# کشورهای اولویت بالا (۳ تا در samarix برای پورت‌های مشکوک)
+HIGH_PRIORITY = {
+    "US", "GB", "DE", "NL", "CA", "FR", "JP", "SG", "KR", "AU", "SE"
+}
+
+# پورت‌های خوب (وبی/طبیعی) – بدون محدودیت تعداد در samarix
+GOOD_PORTS = {80, 443, 8443, 8080, 2053, 2083, 2087, 2095, 2096}
+
+# پورت‌های حساس پرتکرار (کنترل ویژه)
+SENSITIVE_PORTS = {990, 12000}
 
 def log(msg):
     ts = time.strftime("%H:%M:%S")
@@ -103,7 +114,7 @@ def check_tcp(host, port, timeout):
 
 
 def check_ping(host):
-    """تست Ping (فقط در حالت نرم استفاده می‌شود، آن هم اختیاری)."""
+    """تست Ping (فقط در حالت نرم استفاده می‌شود)."""
     try:
         param = "-n" if platform.system().lower() == "windows" else "-c"
         cmd = ["ping", param, "1", "-W", "2", host]
@@ -118,25 +129,22 @@ def check_ping(host):
 
 def test_single_config(link: str, strict_parse: bool, strict_tcp_only: bool):
     """
-    تست یک کانفیگ بر اساس دو پارامتر:
+    تست یک کانفیگ:
       strict_parse:
         True  -> اگر host/port درنیاید، حذف
         False -> اگر host/port درنیاید، نگه داشتن
       strict_tcp_only:
         True  -> فقط TCP قبول است
         False -> اگر TCP نشد ولی Ping اوکی بود، قبول
-    خروجی: (link, is_alive: bool)
     """
     host, port = parse_config(link)
 
     if not host or not port:
         return link, (not strict_parse)
 
-    # TCP معیار اصلی
     if check_tcp(host, port, timeout=CONFIG["test_timeout"]):
         return link, True
 
-    # اگر سخت‌گیر نیستیم، از Ping به‌عنوان fallback استفاده کنیم
     if (not strict_tcp_only) and check_ping(host):
         return link, True
 
@@ -147,10 +155,12 @@ def test_single_config(link: str, strict_parse: bool, strict_tcp_only: bool):
 
 def get_configs():
     log("🚀 شروع دریافت کانفیگ‌ها از v2nodes ...")
-    all_configs = set()
+    all_configs = []
+    seen = set()
 
     session = requests.Session()
 
+    # ترتیب کشورها را تصادفی می‌کنیم، اما داخل هر کشور از بالا به پایین می‌خوانیم
     countries = COUNTRIES.copy()
     random.shuffle(countries)
 
@@ -187,8 +197,9 @@ def get_configs():
                 if not line:
                     continue
                 if any(line.startswith(p) for p in ("vmess://", "vless://", "trojan://", "ss://")):
-                    if line not in all_configs:
-                        all_configs.add(line)
+                    if line not in seen:
+                        seen.add(line)
+                        all_configs.append(line)  # ترتیب سایت حفظ می‌شود
                         new_count += 1
 
             if new_count > 0:
@@ -202,17 +213,13 @@ def get_configs():
 
     session.close()
 
-    log(f"✅ مجموع کانفیگ‌های یکتا: {len(all_configs)}")
-    return list(all_configs)
+    log(f"✅ مجموع کانفیگ‌های یکتا (به‌ترتیب سایت): {len(all_configs)}")
+    return all_configs
 
 
 # ---------------- فیلتر کردن با تنظیمات داده‌شده ----------------
 
 def filter_with_mode(configs, strict_parse: bool, strict_tcp_only: bool, label: str):
-    """
-    یک بار کل لیست configs را با تنظیمات مشخص تست می‌کند.
-    label فقط برای لاگ است (soft / hard).
-    """
     log(f"🔍 شروع تست ({label}) روی {len(configs)} کانفیگ با {CONFIG['max_workers']} ترد ...")
 
     alive = []
@@ -242,6 +249,105 @@ def filter_with_mode(configs, strict_parse: bool, strict_tcp_only: bool, label: 
 
     log(f"✅ تست ({label}) تمام شد. سالم: {len(alive)} ({alive_percent:.1f}%)")
     return alive
+
+
+# ---------------- ابزار کشور و پورت ----------------
+
+def extract_country_code(link: str) -> str:
+    """
+    تلاش برای استخراج کد کشور (US, DE, ...) از قسمت توضیح آخر لینک:
+    مثل: #🇺🇸[www.v2nodes.com] vless-US-11966229
+    """
+    m = re.search(r'\b(vless|vmess|trojan|ss)-([A-Z]{2})-', link)
+    if m:
+        return m.group(2)
+    return "??"  # کشور نامشخص
+
+
+def categorize_port(port: int) -> str:
+    """
+    دسته‌بندی پورت:
+      - "good"      : در GOOD_PORTS
+      - "sensitive" : در SENSITIVE_PORTS (990, 12000)
+      - "risky"     : هر پورت دیگری (به‌طور پیش‌فرض مشکوک)
+    """
+    if port in GOOD_PORTS:
+        return "good"
+    if port in SENSITIVE_PORTS:
+        return "sensitive"
+    return "risky"
+
+
+# ---------------- ساخت samarix.txt ----------------
+
+def build_samarix(soft_configs):
+    """
+    فیلتر سخت‌گیرانه برای ساخت samarix.txt
+
+    منطق:
+      - GOOD_PORTS:
+          * برای همه کشورها بدون محدودیت تعداد (فقط TCP و parse)
+      - SENSITIVE_PORTS (990, 12000):
+          * فقط برای HIGH_PRIORITY
+          * برای each کشور اولویت‌دار: max 3 کانفیگ روی این پورت‌ها
+      - سایر پورت‌ها (risky):
+          * HIGH_PRIORITY → max 5 کانفیگ
+          * others       → max 2 کانفیگ
+      - ترتیب: همان ترتیب soft_configs (جدیدترها اول)
+    """
+    log("🔧 شروع ساخت samarix.txt بر اساس فیلتر کشور/پورت ...")
+
+    selected = []
+
+    # شمارنده برای هر کشور
+    country_risky = {}      # تعداد روی پورت‌های risky (غیر GOOD/SENSITIVE)
+    country_sensitive = {}  # تعداد روی 990/12000
+
+    for link in soft_configs:
+        host, port = parse_config(link)
+        if not host or not port:
+            continue  # در soft نگه داشتیم، ولی برای hard نمی‌گیریم
+
+        try:
+            p = int(port)
+        except Exception:
+            continue
+
+        cc = extract_country_code(link)
+        high = cc in HIGH_PRIORITY
+
+        category = categorize_port(p)
+
+        if category == "good":
+            # پورت‌های خوب: برای همه کشورها آزاد
+            selected.append(link)
+            continue
+
+        if category == "sensitive":
+            # 990 و 12000: فقط برای کشورهای مهم
+            if not high:
+                continue
+            used_sens = country_sensitive.get(cc, 0)
+            max_sens = 3  # حداکثر 3 کانفیگ حساس برای هر کشور معتبر
+            if used_sens >= max_sens:
+                continue
+            country_sensitive[cc] = used_sens + 1
+            selected.append(link)
+            continue
+
+        # category == "risky"
+        used_risky = country_risky.get(cc, 0)
+        max_risky = 5 if high else 2
+        if used_risky >= max_risky:
+            continue
+        country_risky[cc] = used_risky + 1
+        selected.append(link)
+
+    log(f"✅ تعداد نهایی کانفیگ‌های samarix: {len(selected)} "
+        f"(از soft={len(soft_configs)}؛ کشورهای risky: {len(country_risky)}, "
+        f"حساس: {len(country_sensitive)})")
+
+    return selected
 
 
 # ---------------- ذخیره‌سازی ----------------
@@ -279,22 +385,13 @@ def main():
 
     save_list_to_file(soft_alive, CONFIG["soft_file"], "SOFT")
 
-    # 3) فیلتر سخت روی همین soft_alive (برای samarix.txt)
-    hard_alive = filter_with_mode(
-        soft_alive,
-        strict_parse=True,       # سخت: فقط لینک‌های قابل‌پارس
-        strict_tcp_only=True,    # سخت: فقط TCP
-        label="HARD"
-    )
+    # 3) ساخت فیلتر سخت (samarix.txt) بر اساس soft_alive
+    hard_alive = build_samarix(soft_alive)
 
-    if len(hard_alive) < CONFIG["min_hard_configs"]:
-        log(
-            f"⚠️ تعداد کانفیگ سالم در حالت سخت ({len(hard_alive)}) کمتر از حداقل "
-            f"({CONFIG['min_hard_configs']}) است؛ فایل سخت (samarix.txt) آپدیت نمی‌شود."
-        )
-        # sub.txt آپدیت شده، بنابراین job می‌تواند موفق تمام شود
-    else:
+    if hard_alive:
         save_list_to_file(hard_alive, CONFIG["hard_file"], "HARD")
+    else:
+        log("⚠️ هیچ کانفیگی برای samarix انتخاب نشد (احتمالاً فیلتر خیلی محدودکننده بوده).")
 
     sys.exit(0)
 
